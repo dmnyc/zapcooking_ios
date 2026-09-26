@@ -143,11 +143,14 @@ final class LivePlayerStore {
 
     /// Called from `LiveStreamView.onDisappear`. Keeps the player alive when PiP is active.
     func releaseIfNotPiP() {
-        if pipActive { return }
-        player?.pause()
+        // The view's keep-awake claim goes with the view even into PiP:
+        // `VideoPiPCoordinator` holds its own claim for the floating
+        // window, and a restore re-tracks when the view comes back.
         if let player {
             ScreenKeepAwake.untrack(player)
         }
+        if pipActive { return }
+        player?.pause()
         player = nil
         currentURL = nil
     }

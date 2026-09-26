@@ -8,10 +8,10 @@ import Foundation
 /// media pager, live streams, PiP). Surfaces call `track(_:)` when they start
 /// driving a player and `untrack(_:owner:)` when they stop being responsible
 /// for it; each tracked player is observed on `timeControlStatus`, and a
-/// keep-awake claim is held while at least one tracked player isn't paused —
-/// pause, playback end, stalling to rebuffer, and audio-session interruptions
-/// all flow through that one observation, so no per-surface pause/end
-/// bookkeeping can drift.
+/// keep-awake claim is held while at least one tracked player is actually
+/// playing — pause, playback end, stalling to rebuffer, and audio-session
+/// interruptions all flow through that one observation, so no per-surface
+/// pause/end bookkeeping can drift.
 ///
 /// `owner` lets two surfaces hold the same player independently — a visible
 /// feed row and `VideoPiPCoordinator` during Picture-in-Picture. It defaults
@@ -50,8 +50,10 @@ enum ScreenKeepAwake {
     }
 
     private static func refresh() {
+        // `.playing` only: a player stuck in `.waitingToPlayAtSpecifiedRate`
+        // (a stream that never recovers from a stall) must not pin the screen.
         let anyPlaying = entries.values.contains { entry in
-            entry.player.timeControlStatus != .paused
+            entry.player.timeControlStatus == .playing
         }
         guard anyPlaying != lockHeld else { return }
         lockHeld = anyPlaying
