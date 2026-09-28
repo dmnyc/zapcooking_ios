@@ -15,7 +15,10 @@ actor LinkPreviewService {
     private let cacheLimit = 200
 
     private static let ogTagRegex = try! NSRegularExpression(
-        pattern: #"<meta[^>]+property\s*=\s*["']og:(\w+)["'][^>]+content\s*=\s*["']([^"']*)["'][^>]*/?>|<meta[^>]+content\s*=\s*["']([^"']*)["'][^>]+property\s*=\s*["']og:(\w+)["'][^>]*/?>"#,
+        // `content` is matched per quote style so a raw apostrophe inside a
+        // double-quoted value ("browser's side panel") doesn't truncate it.
+        // Groups: 1 prop, 2/3 content (dq/sq); 4/5 content (dq/sq), 6 prop.
+        pattern: #"<meta[^>]+property\s*=\s*["']og:(\w+)["'][^>]+content\s*=\s*(?:"([^"]*)"|'([^']*)')[^>]*/?>|<meta[^>]+content\s*=\s*(?:"([^"]*)"|'([^']*)')[^>]+property\s*=\s*["']og:(\w+)["'][^>]*/?>"#,
         options: [.caseInsensitive]
     )
     private static let titleTagRegex = try! NSRegularExpression(
@@ -195,18 +198,18 @@ actor LinkPreviewService {
         }
     }
 
-    private func parseOgTags(html: String, fallbackUrl: String) -> OpenGraphData? {
+    nonisolated func parseOgTags(html: String, fallbackUrl: String) -> OpenGraphData? {
         let ns = html as NSString
         let range = NSRange(location: 0, length: ns.length)
         var props: [String: String] = [:]
         Self.ogTagRegex.enumerateMatches(in: html, range: range) { match, _, _ in
             guard let match else { return }
-            let propA = match.range(at: 1).location != NSNotFound ? ns.substring(with: match.range(at: 1)) : ""
-            let contentA = match.range(at: 2).location != NSNotFound ? ns.substring(with: match.range(at: 2)) : ""
-            let contentB = match.range(at: 3).location != NSNotFound ? ns.substring(with: match.range(at: 3)) : ""
-            let propB = match.range(at: 4).location != NSNotFound ? ns.substring(with: match.range(at: 4)) : ""
-            let prop = (propA.isEmpty ? propB : propA).lowercased()
-            let content = contentA.isEmpty ? contentB : contentA
+            func group(_ i: Int) -> String {
+                match.range(at: i).location != NSNotFound ? ns.substring(with: match.range(at: i)) : ""
+            }
+            let propA = group(1)
+            let prop = (propA.isEmpty ? group(6) : propA).lowercased()
+            let content = [group(2), group(3), group(4), group(5)].first { !$0.isEmpty } ?? ""
             if !prop.isEmpty, !content.isEmpty, props[prop] == nil {
                 props[prop] = content
             }
@@ -274,11 +277,79 @@ actor LinkPreviewService {
     }
 
     private nonisolated func unescapeHtml(_ s: String) -> String {
-        s.replacingOccurrences(of: "&amp;", with: "&")
-         .replacingOccurrences(of: "&lt;", with: "<")
-         .replacingOccurrences(of: "&gt;", with: ">")
-         .replacingOccurrences(of: "&quot;", with: "\"")
-         .replacingOccurrences(of: "&#39;", with: "'")
-         .replacingOccurrences(of: "&#x27;", with: "'")
+        HTMLEntityDecoder.decode(s)
+    }
+}
+
+/// Decodes HTML character references in OG/title text: decimal (`&#039;`,
+/// `&#8217;`), hex (`&#x2019;`) and the named entities that show up in page
+/// metadata. Unknown or invalid references are left as written.
+nonisolated enum HTMLEntityDecoder {
+    private static let entityRegex = try! NSRegularExpression(
+        pattern: #"&(?:#([0-9]{1,7})|#[xX]([0-9a-fA-F]{1,6})|([A-Za-z][A-Za-z0-9]{1,31}));"#
+    )
+
+    private static let named: [String: String] = [
+        "amp": "&", "lt": "<", "gt": ">", "quot": "\"", "apos": "'",
+        "nbsp": " ", "ensp": " ", "emsp": " ", "thinsp": " ",
+        "lsquo": "\u{2018}", "rsquo": "\u{2019}", "sbquo": "\u{201A}",
+        "ldquo": "\u{201C}", "rdquo": "\u{201D}", "bdquo": "\u{201E}",
+        "laquo": "\u{00AB}", "raquo": "\u{00BB}", "lsaquo": "\u{2039}", "rsaquo": "\u{203A}",
+        "ndash": "\u{2013}", "mdash": "\u{2014}", "hellip": "\u{2026}",
+        "bull": "\u{2022}", "middot": "\u{00B7}", "prime": "\u{2032}", "Prime": "\u{2033}",
+        "copy": "\u{00A9}", "reg": "\u{00AE}", "trade": "\u{2122}",
+        "deg": "\u{00B0}", "times": "\u{00D7}", "divide": "\u{00F7}", "plusmn": "\u{00B1}",
+        "frac12": "\u{00BD}", "frac14": "\u{00BC}", "frac34": "\u{00BE}",
+        "euro": "\u{20AC}", "pound": "\u{00A3}", "yen": "\u{00A5}", "cent": "\u{00A2}",
+        "sect": "\u{00A7}", "para": "\u{00B6}", "dagger": "\u{2020}", "Dagger": "\u{2021}",
+        "iexcl": "\u{00A1}", "iquest": "\u{00BF}", "szlig": "\u{00DF}",
+        "agrave": "\u{00E0}", "aacute": "\u{00E1}", "acirc": "\u{00E2}", "atilde": "\u{00E3}", "auml": "\u{00E4}", "aring": "\u{00E5}", "aelig": "\u{00E6}",
+        "ccedil": "\u{00E7}", "egrave": "\u{00E8}", "eacute": "\u{00E9}", "ecirc": "\u{00EA}", "euml": "\u{00EB}",
+        "igrave": "\u{00EC}", "iacute": "\u{00ED}", "icirc": "\u{00EE}", "iuml": "\u{00EF}",
+        "ntilde": "\u{00F1}", "ograve": "\u{00F2}", "oacute": "\u{00F3}", "ocirc": "\u{00F4}", "otilde": "\u{00F5}", "ouml": "\u{00F6}", "oslash": "\u{00F8}",
+        "ugrave": "\u{00F9}", "uacute": "\u{00FA}", "ucirc": "\u{00FB}", "uuml": "\u{00FC}", "yacute": "\u{00FD}", "yuml": "\u{00FF}",
+        "Agrave": "\u{00C0}", "Aacute": "\u{00C1}", "Acirc": "\u{00C2}", "Atilde": "\u{00C3}", "Auml": "\u{00C4}", "Aring": "\u{00C5}", "AElig": "\u{00C6}",
+        "Ccedil": "\u{00C7}", "Egrave": "\u{00C8}", "Eacute": "\u{00C9}", "Ecirc": "\u{00CA}", "Euml": "\u{00CB}",
+        "Igrave": "\u{00CC}", "Iacute": "\u{00CD}", "Icirc": "\u{00CE}", "Iuml": "\u{00CF}",
+        "Ntilde": "\u{00D1}", "Ograve": "\u{00D2}", "Oacute": "\u{00D3}", "Ocirc": "\u{00D4}", "Otilde": "\u{00D5}", "Ouml": "\u{00D6}", "Oslash": "\u{00D8}",
+        "Ugrave": "\u{00D9}", "Uacute": "\u{00DA}", "Ucirc": "\u{00DB}", "Uuml": "\u{00DC}", "Yacute": "\u{00DD}",
+    ]
+
+    /// Runs up to two passes so double-escaped metadata (`&amp;#039;`, common
+    /// from CMS templates) still decodes to the character.
+    static func decode(_ s: String) -> String {
+        guard s.contains("&") else { return s }
+        let once = decodeOnce(s)
+        return once.contains("&") ? decodeOnce(once) : once
+    }
+
+    private static func decodeOnce(_ s: String) -> String {
+        let ns = s as NSString
+        let matches = entityRegex.matches(in: s, range: NSRange(location: 0, length: ns.length))
+        guard !matches.isEmpty else { return s }
+        var out = ""
+        var cursor = 0
+        for m in matches {
+            out += ns.substring(with: NSRange(location: cursor, length: m.range.location - cursor))
+            out += replacement(for: m, in: ns) ?? ns.substring(with: m.range)
+            cursor = m.range.location + m.range.length
+        }
+        out += ns.substring(from: cursor)
+        return out
+    }
+
+    private static func replacement(for m: NSTextCheckingResult, in ns: NSString) -> String? {
+        func group(_ i: Int) -> String? {
+            m.range(at: i).location != NSNotFound ? ns.substring(with: m.range(at: i)) : nil
+        }
+        if let dec = group(1) { return scalar(UInt32(dec, radix: 10)) }
+        if let hex = group(2) { return scalar(UInt32(hex, radix: 16)) }
+        if let name = group(3) { return named[name] ?? named[name.lowercased()] }
+        return nil
+    }
+
+    private static func scalar(_ value: UInt32?) -> String? {
+        guard let value, value != 0, let u = Unicode.Scalar(value) else { return nil }
+        return String(Character(u))
     }
 }
